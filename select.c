@@ -45,6 +45,7 @@ int display_offset = 0;
 
 void select_loop(void) {
   fd_set readfd;
+  fd_set writefd;
   int anyset = 0;
   int maxfd = 0;
   int dnsfd, netfd;
@@ -62,6 +63,7 @@ void select_loop(void) {
     intervaltime.tv_usec = dt % 1000000;
 
     FD_ZERO(&readfd);
+    FD_ZERO(&writefd);
 
     maxfd = 0;
 
@@ -81,12 +83,14 @@ void select_loop(void) {
     FD_SET(netfd, &readfd);
     if(netfd >= maxfd) maxfd = netfd + 1;
 
+    net_add_fds(&writefd, &maxfd);
+
     do {
       if(anyset || paused) {
 	selecttime.tv_sec = 0;
 	selecttime.tv_usec = 0;
       
-	rv = select(maxfd, (void *)&readfd, NULL, NULL, &selecttime);
+	rv = select(maxfd, (void *)&readfd, &writefd, NULL, &selecttime);
 
       } else {
 	if(Interactive) display_redraw();
@@ -197,6 +201,9 @@ void select_loop(void) {
       }
       anyset = 1;
     }
+
+    /* Check for activity on open sockets */
+    net_process_fds(&writefd);
   }
   return;
 }

@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <memory.h>
 #include <unistd.h>
@@ -62,6 +63,13 @@ struct UDPHeader {
   uint16 dstport;
   uint16 length;
   uint16 checksum;
+};
+
+/* Structure of an TCP header, as far as we need it.  */
+struct TCPHeader {
+  uint16 srcport;
+  uint16 dstport;
+  uint32 seq;
 };
 
 /* Structure of an IPv4 UDP pseudoheader.  */
@@ -132,6 +140,7 @@ struct sequence {
   int transit;
   int saved_seq;
   struct timeval time;
+  int socket;
 };
 
 
@@ -201,6 +210,7 @@ extern int bitpattern;		/* packet bit pattern used by ping */
 extern int tos;			/* type of service set in ping packet*/
 extern int af;			/* address family of remote target */
 extern int mtrtype;		/* type of query packet used */
+extern int remoteport;          /* target port for TCP tracing */
 
 /* return the number of microseconds to wait before sending the next
    ping */
@@ -257,15 +267,8 @@ int udp_checksum(void *pheader, void *udata, int psize, int dsize)
 }
 
 
-int new_sequence(int index) 
+void save_sequence(int index, int seq)
 {
-  static int next_sequence = MinSequence;
-  int seq;
-
-  seq = next_sequence++;
-  if (next_sequence >= MaxSequence)
-    next_sequence = MinSequence;
-
   sequence[seq].index = index;
   sequence[seq].transit = 1;
   sequence[seq].saved_seq = ++host[index].xmit;
@@ -276,14 +279,119 @@ int new_sequence(int index)
     host[index].up = 0;
   host[index].sent = 1;
   net_save_xmit(index);
-  
+}
+
+int new_sequence(int index)
+{
+  static int next_sequence = MinSequence;
+  int seq;
+
+  seq = next_sequence++;
+  if (next_sequence >= MaxSequence)
+    next_sequence = MinSequence;
+
+  save_sequence(index, seq);
+
   return seq;
 }
 
+/*  Attempt to connect to a TCP port with a TTL */
+void net_send_tcp(int index)
+{
+  int ttl, s;
+  int opt = 1;
+  int port;
+  struct sockaddr_storage local;
+  struct sockaddr_storage remote;
+  struct sockaddr_in *local4 = (struct sockaddr_in *) &local;
+  struct sockaddr_in6 *local6 = (struct sockaddr_in6 *) &local;
+  struct sockaddr_in *remote4 = (struct sockaddr_in *) &remote;
+  struct sockaddr_in6 *remote6 = (struct sockaddr_in6 *) &remote;
+  socklen_t len;
+
+  ttl = index + 1;
+
+  s = socket(af, SOCK_STREAM, 0);
+  if (s < 0) {
+    perror("socket()");
+    exit(EXIT_FAILURE);
+  }
+
+  memset(&local, 0, sizeof (local));
+  memset(&remote, 0, sizeof (remote));
+  local.ss_family = af;
+  remote.ss_family = af;
+
+  switch (af) {
+  case AF_INET:
+    addrcpy((void *) &local4->sin_addr, (void *) &ssa4->sin_addr, af);
+    addrcpy((void *) &remote4->sin_addr, (void *) remoteaddress, af);
+    remote4->sin_port = htons(remoteport);
+    break;
+#ifdef ENABLE_IPV6
+  case AF_INET6:
+    addrcpy((void *) &local6->sin6_addr, (void *) &ssa6->sin6_addr, af);
+    addrcpy((void *) &remote6->sin6_addr, (void *) remoteaddress, af);
+    remote6->sin6_port = htons(remoteport);
+    break;
+#endif
+  }
+
+  if (bind(s, (struct sockaddr *) &local, sizeof (local))) {
+    perror("bind()");
+    exit(EXIT_FAILURE);
+  }
+
+  len = sizeof (local);
+  if (getsockname(s, (struct sockaddr *) &local, &len)) {
+    perror("getsockname()");
+    exit(EXIT_FAILURE);
+  }
+
+  opt = 1;
+  if (ioctl(s, FIONBIO, &opt)) {
+    perror("ioctl FIONBIO");
+    exit(EXIT_FAILURE);
+  }
+
+  if (setsockopt(s, IPPROTO_IP, IP_TTL, &ttl, sizeof (ttl))) {
+    perror("setsockopt IP_TTL");
+    exit(EXIT_FAILURE);
+  }
+  if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof (tos))) {
+    perror("setsockopt IP_TOS");
+    exit(EXIT_FAILURE);
+  }
+
+  switch (local.ss_family) {
+  case AF_INET:
+    port = ntohs(local4->sin_port);
+    break;
+#ifdef ENABLE_IPV6
+  case AF_INET6:
+    port = ntohs(local6->sin6_port);
+    break;
+#endif
+  default:
+    perror("unknown AF?");
+    exit(EXIT_FAILURE);
+  }
+
+  save_sequence(index, port);
+  gettimeofday(&sequence[port].time, NULL);
+  sequence[port].socket = s;
+
+  connect(s, (struct sockaddr *) &remote, sizeof (remote));
+}
 
 /*  Attempt to find the host at a particular number of hops away  */
 void net_send_query(int index) 
 {
+  if (mtrtype == IPPROTO_TCP) {
+    net_send_tcp(index);
+    return;
+  }
+
   /*ok  char packet[sizeof(struct IPHeader) + sizeof(struct ICMPHeader)];*/
   char packet[MAXPACKET];
   struct IPHeader *ip = (struct IPHeader *) packet;
@@ -459,6 +567,11 @@ void net_process_ping(int seq, struct mplslen mpls, void * addr, struct timeval 
     return;
   sequence[seq].transit = 0;
 
+  if (sequence[seq].socket > 0) {
+    close(sequence[seq].socket);
+    sequence[seq].socket = 0;
+  }
+
   index = sequence[seq].index;
 
   totusec = (now.tv_sec  - sequence[seq].time.tv_sec ) * 1000000 +
@@ -565,6 +678,7 @@ void net_process_return(void)
   int num;
   struct ICMPHeader *header = NULL;
   struct UDPHeader *udpheader = NULL;
+  struct TCPHeader *tcpheader = NULL;
   struct timeval now;
   ip_t * fromaddress = NULL;
   int echoreplytype = 0, timeexceededtype = 0, unreachabletype = 0;
@@ -694,6 +808,43 @@ void net_process_return(void)
 #endif
       }
       sequence = ntohs(udpheader->dstport);
+    }
+    break;
+
+  case IPPROTO_TCP:
+    if (header->type == timeexceededtype || header->type == unreachabletype) {
+      switch ( af ) {
+      case AF_INET:
+
+        if ((size_t) num < sizeof(struct IPHeader) +
+                           sizeof(struct ICMPHeader) +
+                           sizeof (struct IPHeader) +
+                           sizeof (struct TCPHeader))
+          return;
+        tcpheader = (struct TCPHeader *)(packet + sizeof (struct IPHeader) +
+                                                  sizeof (struct ICMPHeader) +
+                                                  sizeof (struct IPHeader));
+
+        if(num > 160)
+          decodempls(num, packet, &mpls, 156);
+
+      break;
+#ifdef ENABLE_IPV6
+      case AF_INET6:
+        if ( num < sizeof (struct ICMPHeader) +
+                   sizeof (struct ip6_hdr) + sizeof (struct TCPHeader) )
+          return;
+        tcpheader = (struct TCPHeader *) ( packet +
+                                           sizeof (struct ICMPHeader) +
+                                           sizeof (struct ip6_hdr) );
+
+        if(num > 140)
+          decodempls(num, packet, &mpls, 136);
+
+        break;
+#endif
+      }
+      sequence = ntohs(tcpheader->srcport);
     }
     break;
   }
@@ -1138,6 +1289,10 @@ void net_reset(void)
   
   for (at = 0; at < MaxSequence; at++) {
     sequence[at].transit = 0;
+    if (sequence[at].socket > 0) {
+      close(sequence[at].socket);
+      sequence[at].socket = 0;
+    }
   }
 
   gettimeofday(&reset, NULL);
@@ -1331,6 +1486,44 @@ void decodempls(int num, char *packet, struct mplslen *mpls, int offset) {
         mpls->s[i] = (packet[(offset+10)+(i*4)] & 0x1); /* should be 1 if only one label */
         mpls->ttl[i] = packet[(offset+11)+(i*4)];
       }
+    }
+  }
+}
+
+/* Add open sockets to select() */
+void net_add_fds(fd_set *writefd, int *maxfd)
+{
+  int at, fd;
+  for (at = 0; at < MaxSequence; at++) {
+    fd = sequence[at].socket;
+    if (fd > 0) {
+      FD_SET(fd, writefd);
+      if (fd >= *maxfd)
+        *maxfd = fd + 1;
+    }
+  }
+}
+
+/* check if we got connection or error on any fds */
+void net_process_fds(fd_set *writefd)
+{
+  int at, fd, r;
+  struct timeval now;
+
+  /* Can't do MPLS decoding */
+  struct mplslen mpls;
+  mpls.labels = 0;
+
+  gettimeofday(&now, NULL);
+
+  for (at = 0; at < MaxSequence; at++) {
+    fd = sequence[at].socket;
+    if (fd > 0 && FD_ISSET(fd, writefd)) {
+      r = write(fd, "G", 1);
+      /* if write was successful, or unsuccessful other than blocking, we've
+       * (probably) reached the remote address */
+      if (r == 1 || errno != EAGAIN)
+        net_process_ping(at, mpls, remoteaddress, now);
     }
   }
 }

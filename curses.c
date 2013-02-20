@@ -260,6 +260,17 @@ int mtr_curses_keyaction(void)
     }
     return ActionNone;
   }
+  if (tolower(c) == 't') {
+    switch ( mtrtype ) {
+    case IPPROTO_ICMP:
+      mtrtype = IPPROTO_TCP;
+      break;
+    case IPPROTO_UDP:
+      mtrtype = IPPROTO_ICMP;
+      break;
+    }
+    return ActionNone;
+  }
   /* reserve to display help message -Min */
   if (tolower(c) == '?'|| tolower(c) == 'h') {
     mvprintw(2, 0, "Command:\n" );
