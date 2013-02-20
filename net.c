@@ -211,6 +211,7 @@ extern int tos;			/* type of service set in ping packet*/
 extern int af;			/* address family of remote target */
 extern int mtrtype;		/* type of query packet used */
 extern int remoteport;          /* target port for TCP tracing */
+extern int timeout;             /* timeout for TCP connections */
 
 /* return the number of microseconds to wait before sending the next
    ping */
@@ -313,6 +314,7 @@ void net_send_tcp(int index)
 
   s = socket(af, SOCK_STREAM, 0);
   if (s < 0) {
+    display_clear();
     perror("socket()");
     exit(EXIT_FAILURE);
   }
@@ -338,27 +340,32 @@ void net_send_tcp(int index)
   }
 
   if (bind(s, (struct sockaddr *) &local, sizeof (local))) {
+    display_clear();
     perror("bind()");
     exit(EXIT_FAILURE);
   }
 
   len = sizeof (local);
   if (getsockname(s, (struct sockaddr *) &local, &len)) {
+    display_clear();
     perror("getsockname()");
     exit(EXIT_FAILURE);
   }
 
   opt = 1;
   if (ioctl(s, FIONBIO, &opt)) {
+    display_clear();
     perror("ioctl FIONBIO");
     exit(EXIT_FAILURE);
   }
 
   if (setsockopt(s, IPPROTO_IP, IP_TTL, &ttl, sizeof (ttl))) {
+    display_clear();
     perror("setsockopt IP_TTL");
     exit(EXIT_FAILURE);
   }
   if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof (tos))) {
+    display_clear();
     perror("setsockopt IP_TOS");
     exit(EXIT_FAILURE);
   }
@@ -373,6 +380,7 @@ void net_send_tcp(int index)
     break;
 #endif
   default:
+    display_clear();
     perror("unknown AF?");
     exit(EXIT_FAILURE);
   }
@@ -1508,21 +1516,35 @@ void net_process_fds(fd_set *writefd)
 {
   int at, fd, r;
   struct timeval now;
+  uint64_t unow, utime;
 
   /* Can't do MPLS decoding */
   struct mplslen mpls;
   mpls.labels = 0;
 
   gettimeofday(&now, NULL);
+  unow = now.tv_sec * 1000000L + now.tv_usec;
 
   for (at = 0; at < MaxSequence; at++) {
     fd = sequence[at].socket;
     if (fd > 0 && FD_ISSET(fd, writefd)) {
       r = write(fd, "G", 1);
-      /* if write was successful, or unsuccessful other than blocking, we've
-       * (probably) reached the remote address */
-      if (r == 1 || errno != EAGAIN)
+      /* if write was successful, or connection refused we have
+       * (probably) reached the remote address. Anything else happens to the
+       * connection, we write it off to avoid leaking sockets */
+      if (r == 1 || errno == ECONNREFUSED)
         net_process_ping(at, mpls, remoteaddress, now);
+      else if (errno != EAGAIN) {
+        close(fd);
+        sequence[at].socket = 0;
+      }
+    }
+    if (fd > 0) {
+      utime = sequence[at].time.tv_sec * 1000000L + sequence[at].time.tv_usec;
+      if (unow - utime > timeout) {
+        close(fd);
+        sequence[at].socket = 0;
+      }
     }
   }
 }
