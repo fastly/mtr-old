@@ -359,15 +359,28 @@ void net_send_tcp(int index)
     exit(EXIT_FAILURE);
   }
 
-  if (setsockopt(s, IPPROTO_IP, IP_TTL, &ttl, sizeof (ttl))) {
-    display_clear();
-    perror("setsockopt IP_TTL");
-    exit(EXIT_FAILURE);
-  }
-  if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof (tos))) {
-    display_clear();
-    perror("setsockopt IP_TOS");
-    exit(EXIT_FAILURE);
+  switch (af) {
+  case AF_INET:
+    if (setsockopt(s, IPPROTO_IP, IP_TTL, &ttl, sizeof (ttl))) {
+      display_clear();
+      perror("setsockopt IP_TTL");
+      exit(EXIT_FAILURE);
+    }
+    if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof (tos))) {
+      display_clear();
+      perror("setsockopt IP_TOS");
+      exit(EXIT_FAILURE);
+    }
+    break;
+#ifdef ENABLE_IPV6
+  case AF_INET6:
+    if (setsockopt(s, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl, sizeof (ttl))) {
+      display_clear();
+      perror("setsockopt IP_TTL");
+      exit(EXIT_FAILURE);
+    }
+    break;
+#endif
   }
 
   switch (local.ss_family) {
