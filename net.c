@@ -29,6 +29,7 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <memory.h>
 #include <unistd.h>
@@ -1560,4 +1561,19 @@ void net_process_fds(fd_set *writefd)
       }
     }
   }
+}
+
+/* for GTK frontend */
+void net_harvest_fds(void)
+{
+  fd_set writefd;
+  int maxfd = 0;
+  struct timeval tv;
+
+  FD_ZERO(&writefd);
+  tv.tv_sec = 0;
+  tv.tv_usec = 0;
+  net_add_fds(&writefd, &maxfd);
+  select(maxfd, NULL, &writefd, NULL, &tv);
+  net_process_fds(&writefd);
 }

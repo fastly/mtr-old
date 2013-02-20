@@ -35,6 +35,7 @@ void net_reset(void);
 void net_close(void);
 int net_waitfd(void);
 void net_process_return(void);
+void net_harvest_fds(void);
 
 int net_max(void);
 int net_min(void);
