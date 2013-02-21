@@ -38,6 +38,7 @@ extern int MaxPing;
 extern int ForceMaxPing;
 extern float WaitTime;
 double dnsinterval;
+extern int mtrtype;
 
 static struct timeval intervaltime;
 int display_offset = 0;
@@ -83,7 +84,8 @@ void select_loop(void) {
     FD_SET(netfd, &readfd);
     if(netfd >= maxfd) maxfd = netfd + 1;
 
-    net_add_fds(&writefd, &maxfd);
+    if (mtrtype == IPPROTO_TCP)
+      net_add_fds(&writefd, &maxfd);
 
     do {
       if(anyset || paused) {
@@ -203,7 +205,8 @@ void select_loop(void) {
     }
 
     /* Check for activity on open sockets */
-    net_process_fds(&writefd);
+    if (mtrtype == IPPROTO_TCP)
+      net_process_fds(&writefd);
   }
   return;
 }
